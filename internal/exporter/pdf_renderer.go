@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/jung-kurt/gofpdf"
 	"github.com/yuin/goldmark"
@@ -27,8 +28,22 @@ type markdownPDFRenderer struct {
 	pdf          *gofpdf.Fpdf
 	source       []byte
 	bodyFont     string
+	monoFont     string
+	codeCJKFont  string
 	contentWidth float64
 	projectPath  string
+}
+
+type pdfInlineSegment struct {
+	Text   string
+	Bold   bool
+	Italic bool
+	Code   bool
+}
+
+type pdfInlineAtom struct {
+	Text    string
+	Segment pdfInlineSegment
 }
 
 func RenderMarkdownPDF(markdownText string, projectPath string, targetPath string) error {
@@ -55,12 +70,28 @@ func newMarkdownPDFRenderer(markdownText string, projectPath string) (*markdownP
 	if err != nil {
 		return nil, err
 	}
+	boldFontBytes := fontBytes
+	if data, err := readBoldFont(); err == nil {
+		boldFontBytes = data
+	}
+	monoFontBytes := fontBytes
+	if data, err := readMonoFont(); err == nil {
+		monoFontBytes = data
+	}
+	codeCJKFontBytes := fontBytes
+	if data, err := readCodeCJKFont(); err == nil {
+		codeCJKFontBytes = data
+	}
 
 	bodyFont := "ViewMDBody"
+	monoFont := "ViewMDMono"
+	codeCJKFont := "ViewMDCodeCJK"
 	pdf.AddUTF8FontFromBytes(bodyFont, "", fontBytes)
-	pdf.AddUTF8FontFromBytes(bodyFont, "B", fontBytes)
+	pdf.AddUTF8FontFromBytes(bodyFont, "B", boldFontBytes)
 	pdf.AddUTF8FontFromBytes(bodyFont, "I", fontBytes)
-	pdf.AddUTF8FontFromBytes(bodyFont, "BI", fontBytes)
+	pdf.AddUTF8FontFromBytes(bodyFont, "BI", boldFontBytes)
+	pdf.AddUTF8FontFromBytes(monoFont, "", monoFontBytes)
+	pdf.AddUTF8FontFromBytes(codeCJKFont, "", codeCJKFontBytes)
 	if err := pdf.Error(); err != nil {
 		return nil, err
 	}
@@ -81,6 +112,8 @@ func newMarkdownPDFRenderer(markdownText string, projectPath string) (*markdownP
 		pdf:          pdf,
 		source:       []byte(markdownText),
 		bodyFont:     bodyFont,
+		monoFont:     monoFont,
+		codeCJKFont:  codeCJKFont,
 		contentWidth: 210 - pdfMarginLeft - pdfMarginRight,
 		projectPath:  projectPath,
 	}, nil
@@ -124,8 +157,8 @@ func (r *markdownPDFRenderer) renderBlock(node goldast.Node, indent float64) {
 }
 
 func (r *markdownPDFRenderer) renderHeading(node *goldast.Heading, indent float64) {
-	text := r.inlineText(node)
-	if text == "" {
+	segments := r.inlineSegments(node)
+	if len(segments) == 0 {
 		return
 	}
 
@@ -151,7 +184,7 @@ func (r *markdownPDFRenderer) renderHeading(node *goldast.Heading, indent float6
 	if r.pdf.GetY() > pdfMarginTop+1 && spaceBefore > 0 {
 		r.pdf.Ln(spaceBefore)
 	}
-	r.renderText(text, size, lineHeight, "B", indent, 17, 23, 27)
+	r.renderInlineSegments(segments, size, lineHeight, "B", indent)
 
 	if node.Level == 1 {
 		x := pdfMarginLeft + indent
@@ -171,11 +204,11 @@ func (r *markdownPDFRenderer) renderParagraph(node *goldast.Paragraph, indent fl
 		}
 	}
 
-	text := r.inlineText(node)
-	if text == "" {
+	segments := r.inlineSegments(node)
+	if len(segments) == 0 {
 		return
 	}
-	r.renderText(text, 11.5, 6.4, "", indent, 32, 35, 33)
+	r.renderInlineSegments(segments, 11.5, 6.4, "", indent)
 	r.pdf.Ln(2)
 }
 
@@ -186,7 +219,7 @@ func (r *markdownPDFRenderer) renderList(node *goldast.List, indent float64) {
 	}
 
 	for item := node.FirstChild(); item != nil; item = item.NextSibling() {
-		marker := "•"
+		marker := "\u00b7"
 		if node.IsOrdered() {
 			marker = fmt.Sprintf("%d.", number)
 			number++
@@ -200,9 +233,9 @@ func (r *markdownPDFRenderer) renderListItem(marker string, item goldast.Node, i
 	markerUsed := false
 	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
 		if paragraph, ok := child.(*goldast.Paragraph); ok && !markerUsed {
-			text := r.inlineText(paragraph)
-			if text != "" {
-				r.renderMarkedText(marker, text, indent)
+			segments := r.inlineSegments(paragraph)
+			if len(segments) > 0 {
+				r.renderMarkedInline(marker, segments, indent)
 				markerUsed = true
 			}
 			continue
@@ -216,11 +249,30 @@ func (r *markdownPDFRenderer) renderListItem(marker string, item goldast.Node, i
 }
 
 func (r *markdownPDFRenderer) renderMarkedText(marker string, text string, indent float64) {
+	markerWidth := r.listMarkerWidth(marker)
 	r.pdf.SetFont(r.bodyFont, "", 11.5)
 	r.pdf.SetTextColor(32, 35, 33)
 	r.pdf.SetX(pdfMarginLeft + indent)
-	r.pdf.CellFormat(8, 6.4, marker, "", 0, "L", false, 0, "")
-	r.pdf.MultiCell(r.contentWidth-indent-8, 6.4, text, "", "L", false)
+	r.pdf.CellFormat(markerWidth, 6.4, marker, "", 0, "L", false, 0, "")
+	r.pdf.MultiCell(r.contentWidth-indent-markerWidth, 6.4, text, "", "L", false)
+}
+
+func (r *markdownPDFRenderer) renderMarkedInline(marker string, segments []pdfInlineSegment, indent float64) {
+	markerWidth := r.listMarkerWidth(marker)
+	r.pdf.SetFont(r.bodyFont, "", 11.5)
+	r.pdf.SetTextColor(32, 35, 33)
+	r.pdf.SetX(pdfMarginLeft + indent)
+	r.pdf.CellFormat(markerWidth, 6.4, marker, "", 0, "L", false, 0, "")
+	r.renderInlineSegmentsAt(segments, 11.5, 6.4, "", pdfMarginLeft+indent+markerWidth, r.contentWidth-indent-markerWidth)
+}
+
+func (r *markdownPDFRenderer) listMarkerWidth(marker string) float64 {
+	r.pdf.SetFont(r.bodyFont, "", 11.5)
+	width := r.pdf.GetStringWidth(marker) + 3
+	if width < 8 {
+		return 8
+	}
+	return width
 }
 
 func (r *markdownPDFRenderer) renderCodeBlock(code string, indent float64) {
@@ -229,11 +281,52 @@ func (r *markdownPDFRenderer) renderCodeBlock(code string, indent float64) {
 		return
 	}
 
-	r.pdf.SetFont(r.bodyFont, "", 9.7)
-	r.pdf.SetTextColor(237, 242, 234)
-	r.pdf.SetFillColor(17, 23, 27)
-	r.pdf.SetX(pdfMarginLeft + indent)
-	r.pdf.MultiCell(r.contentWidth-indent, 5.2, code, "", "L", true)
+	blockWidth := r.contentWidth - indent
+	paddingX := 4.0
+	paddingY := 3.2
+	lineHeight := 5.2
+	fontSize := 9.4
+	textWidth := blockWidth - paddingX*2
+
+	wrappedLines := make([][]pdfInlineAtom, 0)
+	for _, line := range strings.Split(strings.ReplaceAll(code, "\r\n", "\n"), "\n") {
+		wrappedLines = append(wrappedLines, r.wrapCodeLine(line, textWidth, fontSize)...)
+	}
+
+	x := pdfMarginLeft + indent
+	for len(wrappedLines) > 0 {
+		_, pageHeight := r.pdf.GetPageSize()
+		availableHeight := pageHeight - pdfMarginBottom - r.pdf.GetY()
+		maxLines := int((availableHeight - paddingY*2) / lineHeight)
+		if maxLines < 1 {
+			r.pdf.AddPage()
+			continue
+		}
+		if maxLines > len(wrappedLines) {
+			maxLines = len(wrappedLines)
+		}
+
+		chunk := wrappedLines[:maxLines]
+		blockHeight := float64(len(chunk))*lineHeight + paddingY*2
+		y := r.pdf.GetY()
+
+		r.pdf.SetFillColor(17, 23, 27)
+		r.pdf.RoundedRect(x, y, blockWidth, blockHeight, 2, "1234", "F")
+		r.pdf.SetTextColor(237, 242, 234)
+
+		textY := y + paddingY
+		for _, line := range chunk {
+			r.drawCodeLine(line, x+paddingX, textY, lineHeight, fontSize)
+			textY += lineHeight
+		}
+
+		r.pdf.SetY(y + blockHeight)
+		wrappedLines = wrappedLines[maxLines:]
+		if len(wrappedLines) > 0 {
+			r.pdf.AddPage()
+		}
+	}
+
 	r.pdf.Ln(3)
 	r.pdf.SetTextColor(32, 35, 33)
 	r.pdf.SetFillColor(255, 255, 255)
@@ -442,6 +535,416 @@ func (r *markdownPDFRenderer) inlineText(node goldast.Node) string {
 	return normalizeInlineText(builder.String())
 }
 
+func (r *markdownPDFRenderer) inlineSegments(node goldast.Node) []pdfInlineSegment {
+	segments := make([]pdfInlineSegment, 0)
+
+	var visit func(goldast.Node, pdfInlineSegment)
+	visit = func(current goldast.Node, style pdfInlineSegment) {
+		switch n := current.(type) {
+		case *goldast.Text:
+			text := string(n.Text(r.source))
+			if n.HardLineBreak() {
+				text += "\n"
+			} else if n.SoftLineBreak() {
+				text += " "
+			}
+			appendInlineSegment(&segments, pdfInlineSegment{
+				Text:   text,
+				Bold:   style.Bold,
+				Italic: style.Italic,
+				Code:   style.Code,
+			})
+			return
+		case *goldast.String:
+			appendInlineSegment(&segments, pdfInlineSegment{
+				Text:   string(n.Text(r.source)),
+				Bold:   style.Bold,
+				Italic: style.Italic,
+				Code:   style.Code,
+			})
+			return
+		case *goldast.Emphasis:
+			next := style
+			if n.Level >= 2 {
+				next.Bold = true
+			} else {
+				next.Italic = true
+			}
+			for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+				visit(child, next)
+			}
+			return
+		case *goldast.CodeSpan:
+			text := strings.ReplaceAll(r.inlineText(n), "\n", " ")
+			appendInlineSegment(&segments, pdfInlineSegment{
+				Text: text,
+				Code: true,
+			})
+			return
+		}
+
+		for child := current.FirstChild(); child != nil; child = child.NextSibling() {
+			visit(child, style)
+		}
+	}
+
+	visit(node, pdfInlineSegment{})
+	return trimInlineSegments(segments)
+}
+
+func (r *markdownPDFRenderer) renderInlineSegments(segments []pdfInlineSegment, size float64, lineHeight float64, baseStyle string, indent float64) {
+	r.renderInlineSegmentsAt(segments, size, lineHeight, baseStyle, pdfMarginLeft+indent, r.contentWidth-indent)
+}
+
+func (r *markdownPDFRenderer) renderInlineSegmentsAt(segments []pdfInlineSegment, size float64, lineHeight float64, baseStyle string, leftX float64, width float64) {
+	atoms := inlineAtoms(segments)
+	if len(atoms) == 0 || width <= 0 {
+		return
+	}
+
+	x := leftX
+	y := r.pdf.GetY()
+	rightX := leftX + width
+	drew := false
+
+	for _, atom := range atoms {
+		if atom.Text == "\n" {
+			y = r.nextInlineLine(y, lineHeight)
+			x = leftX
+			continue
+		}
+
+		parts := []pdfInlineAtom{atom}
+		if r.inlineAtomWidth(atom, size, baseStyle) > width && len([]rune(atom.Text)) > 1 {
+			parts = splitInlineAtom(atom)
+		}
+
+		for _, part := range parts {
+			if part.Text == " " && nearSameX(x, leftX) {
+				continue
+			}
+
+			atomWidth := r.inlineAtomWidth(part, size, baseStyle)
+			if !nearSameX(x, leftX) && x+atomWidth > rightX {
+				y = r.nextInlineLine(y, lineHeight)
+				x = leftX
+				if part.Text == " " {
+					continue
+				}
+			}
+
+			r.ensureInlineSpace(&y, lineHeight)
+			r.drawInlineAtom(part, x, y, atomWidth, lineHeight, size, baseStyle)
+			x += atomWidth
+			drew = true
+		}
+	}
+
+	if drew {
+		r.pdf.SetXY(leftX, y+lineHeight)
+		r.pdf.SetFont(r.bodyFont, "", 11.5)
+		r.pdf.SetTextColor(32, 35, 33)
+		r.pdf.SetFillColor(255, 255, 255)
+	}
+}
+
+func (r *markdownPDFRenderer) nextInlineLine(y float64, lineHeight float64) float64 {
+	y += lineHeight
+	r.ensureInlineSpace(&y, lineHeight)
+	return y
+}
+
+func (r *markdownPDFRenderer) ensureInlineSpace(y *float64, lineHeight float64) {
+	_, pageHeight := r.pdf.GetPageSize()
+	if *y+lineHeight > pageHeight-pdfMarginBottom {
+		r.pdf.AddPage()
+		*y = r.pdf.GetY()
+	}
+}
+
+func (r *markdownPDFRenderer) drawInlineAtom(atom pdfInlineAtom, x float64, y float64, width float64, lineHeight float64, size float64, baseStyle string) {
+	if atom.Segment.Code {
+		r.setCodeFont(atom.Text, inlineCodeFontSize(size))
+		r.pdf.SetXY(x, y)
+		paddingX := 1.25
+		textWidth := width - paddingX*2
+		r.pdf.SetFillColor(245, 229, 221)
+		r.pdf.RoundedRect(x, y+0.7, width, lineHeight-1.15, 1.2, "1234", "F")
+		r.pdf.SetTextColor(141, 57, 34)
+		r.pdf.SetXY(x+paddingX, y)
+		r.pdf.CellFormat(textWidth, lineHeight, atom.Text, "", 0, "L", false, 0, "")
+		return
+	}
+
+	r.setInlineFont(atom.Segment, size, baseStyle)
+	r.pdf.SetXY(x, y)
+	r.pdf.SetTextColor(32, 35, 33)
+	r.pdf.CellFormat(width, lineHeight, atom.Text, "", 0, "L", false, 0, "")
+}
+
+func (r *markdownPDFRenderer) inlineAtomWidth(atom pdfInlineAtom, size float64, baseStyle string) float64 {
+	if atom.Segment.Code {
+		r.setCodeFont(atom.Text, inlineCodeFontSize(size))
+		return r.pdf.GetStringWidth(atom.Text) + 2.5
+	}
+
+	r.setInlineFont(atom.Segment, size, baseStyle)
+	return r.pdf.GetStringWidth(atom.Text)
+}
+
+func (r *markdownPDFRenderer) setInlineFont(segment pdfInlineSegment, size float64, baseStyle string) {
+	if segment.Code {
+		r.setCodeFont(segment.Text, inlineCodeFontSize(size))
+		return
+	}
+
+	bold := segment.Bold || strings.Contains(baseStyle, "B")
+	italic := segment.Italic || strings.Contains(baseStyle, "I")
+	style := ""
+	if bold {
+		style += "B"
+	}
+	if italic {
+		style += "I"
+	}
+	r.pdf.SetFont(r.bodyFont, style, size)
+}
+
+func inlineCodeFontSize(size float64) float64 {
+	codeSize := size * 0.92
+	if codeSize < 8 {
+		return 8
+	}
+	return codeSize
+}
+
+func (r *markdownPDFRenderer) setCodeFont(text string, size float64) {
+	if needsCJKFont(text) {
+		r.pdf.SetFont(r.codeCJKFont, "", size)
+		return
+	}
+	r.pdf.SetFont(r.monoFont, "", size)
+}
+
+func (r *markdownPDFRenderer) wrapCodeLine(line string, width float64, size float64) [][]pdfInlineAtom {
+	atoms := codeAtoms(strings.ReplaceAll(line, "\t", "    "))
+	if len(atoms) == 0 {
+		return [][]pdfInlineAtom{{}}
+	}
+
+	lines := make([][]pdfInlineAtom, 0)
+	current := make([]pdfInlineAtom, 0)
+	currentWidth := 0.0
+
+	for _, atom := range atoms {
+		parts := []pdfInlineAtom{atom}
+		if r.codeAtomWidth(atom, size) > width && len([]rune(atom.Text)) > 1 {
+			parts = splitInlineAtom(atom)
+		}
+
+		for _, part := range parts {
+			partWidth := r.codeAtomWidth(part, size)
+			if len(current) > 0 && currentWidth+partWidth > width {
+				lines = append(lines, current)
+				current = make([]pdfInlineAtom, 0)
+				currentWidth = 0
+			}
+			current = append(current, part)
+			currentWidth += partWidth
+		}
+	}
+
+	if len(current) > 0 {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func (r *markdownPDFRenderer) drawCodeLine(atoms []pdfInlineAtom, x float64, y float64, lineHeight float64, size float64) {
+	currentX := x
+	for _, atom := range atoms {
+		width := r.codeAtomWidth(atom, size)
+		r.setCodeFont(atom.Text, size)
+		r.pdf.SetTextColor(237, 242, 234)
+		r.pdf.SetXY(currentX, y)
+		r.pdf.CellFormat(width, lineHeight, atom.Text, "", 0, "L", false, 0, "")
+		currentX += width
+	}
+}
+
+func (r *markdownPDFRenderer) codeAtomWidth(atom pdfInlineAtom, size float64) float64 {
+	r.setCodeFont(atom.Text, size)
+	return r.pdf.GetStringWidth(atom.Text)
+}
+
+func appendInlineSegment(segments *[]pdfInlineSegment, segment pdfInlineSegment) {
+	if segment.Text == "" {
+		return
+	}
+
+	lastIndex := len(*segments) - 1
+	if lastIndex >= 0 && sameInlineStyle((*segments)[lastIndex], segment) {
+		(*segments)[lastIndex].Text += segment.Text
+		return
+	}
+	*segments = append(*segments, segment)
+}
+
+func sameInlineStyle(left pdfInlineSegment, right pdfInlineSegment) bool {
+	return left.Bold == right.Bold && left.Italic == right.Italic && left.Code == right.Code
+}
+
+func trimInlineSegments(segments []pdfInlineSegment) []pdfInlineSegment {
+	for len(segments) > 0 && !segments[0].Code {
+		segments[0].Text = strings.TrimLeftFunc(segments[0].Text, unicode.IsSpace)
+		if segments[0].Text != "" {
+			break
+		}
+		segments = segments[1:]
+	}
+
+	for len(segments) > 0 {
+		last := len(segments) - 1
+		if segments[last].Code {
+			break
+		}
+		segments[last].Text = strings.TrimRightFunc(segments[last].Text, unicode.IsSpace)
+		if segments[last].Text != "" {
+			break
+		}
+		segments = segments[:last]
+	}
+
+	return segments
+}
+
+func inlineAtoms(segments []pdfInlineSegment) []pdfInlineAtom {
+	atoms := make([]pdfInlineAtom, 0)
+	for _, segment := range segments {
+		if segment.Text == "" {
+			continue
+		}
+		if segment.Code {
+			appendCodeAtoms(&atoms, segment.Text)
+			continue
+		}
+		appendTextAtoms(&atoms, segment)
+	}
+	return collapseSpaceAtoms(atoms)
+}
+
+func appendCodeAtoms(atoms *[]pdfInlineAtom, text string) {
+	*atoms = append(*atoms, codeAtoms(text)...)
+}
+
+func codeAtoms(text string) []pdfInlineAtom {
+	atoms := make([]pdfInlineAtom, 0)
+	var builder strings.Builder
+	currentNeedsCJK := false
+	hasCurrentStyle := false
+
+	flush := func() {
+		if builder.Len() == 0 {
+			return
+		}
+		value := builder.String()
+		atoms = append(atoms, pdfInlineAtom{
+			Text: value,
+			Segment: pdfInlineSegment{
+				Text: value,
+				Code: true,
+			},
+		})
+		builder.Reset()
+	}
+
+	for _, char := range text {
+		needsCJK := needsCJKRune(char)
+		if hasCurrentStyle && needsCJK != currentNeedsCJK {
+			flush()
+		}
+		builder.WriteRune(char)
+		currentNeedsCJK = needsCJK
+		hasCurrentStyle = true
+	}
+	flush()
+	return atoms
+}
+
+func appendTextAtoms(atoms *[]pdfInlineAtom, segment pdfInlineSegment) {
+	var builder strings.Builder
+	flush := func() {
+		if builder.Len() == 0 {
+			return
+		}
+		*atoms = append(*atoms, pdfInlineAtom{Text: builder.String(), Segment: segment})
+		builder.Reset()
+	}
+
+	for _, char := range strings.ReplaceAll(segment.Text, "\r\n", "\n") {
+		switch {
+		case char == '\r':
+			continue
+		case char == '\n':
+			flush()
+			*atoms = append(*atoms, pdfInlineAtom{Text: "\n", Segment: segment})
+		case unicode.IsSpace(char):
+			flush()
+			*atoms = append(*atoms, pdfInlineAtom{Text: " ", Segment: segment})
+		case char < 128:
+			builder.WriteRune(char)
+		default:
+			flush()
+			*atoms = append(*atoms, pdfInlineAtom{Text: string(char), Segment: segment})
+		}
+	}
+	flush()
+}
+
+func collapseSpaceAtoms(atoms []pdfInlineAtom) []pdfInlineAtom {
+	collapsed := make([]pdfInlineAtom, 0, len(atoms))
+	for _, atom := range atoms {
+		if !atom.Segment.Code && atom.Text == " " {
+			if len(collapsed) == 0 || collapsed[len(collapsed)-1].Text == " " || collapsed[len(collapsed)-1].Text == "\n" {
+				continue
+			}
+		}
+		if !atom.Segment.Code && atom.Text == "\n" && len(collapsed) > 0 && collapsed[len(collapsed)-1].Text == " " {
+			collapsed = collapsed[:len(collapsed)-1]
+		}
+		collapsed = append(collapsed, atom)
+	}
+	return collapsed
+}
+
+func needsCJKFont(text string) bool {
+	for _, char := range text {
+		if needsCJKRune(char) {
+			return true
+		}
+	}
+	return false
+}
+
+func needsCJKRune(char rune) bool {
+	return char > unicode.MaxASCII
+}
+
+func splitInlineAtom(atom pdfInlineAtom) []pdfInlineAtom {
+	parts := make([]pdfInlineAtom, 0, len([]rune(atom.Text)))
+	for _, char := range atom.Text {
+		parts = append(parts, pdfInlineAtom{Text: string(char), Segment: atom.Segment})
+	}
+	return parts
+}
+
+func nearSameX(left float64, right float64) bool {
+	if left > right {
+		return left-right < 0.01
+	}
+	return right-left < 0.01
+}
+
 func linesText(lines *goldtext.Segments, source []byte) string {
 	var builder strings.Builder
 	for index := 0; index < lines.Len(); index++ {
@@ -460,7 +963,23 @@ func normalizeInlineText(text string) string {
 }
 
 func readBodyFont() ([]byte, error) {
-	for _, candidate := range bodyFontCandidates() {
+	return readFirstFont(bodyFontCandidates(), "no suitable TrueType font was found for PDF export")
+}
+
+func readBoldFont() ([]byte, error) {
+	return readFirstFont(boldFontCandidates(), "no suitable bold TrueType font was found for PDF export")
+}
+
+func readMonoFont() ([]byte, error) {
+	return readFirstFont(monoFontCandidates(), "no suitable monospace TrueType font was found for PDF export")
+}
+
+func readCodeCJKFont() ([]byte, error) {
+	return readFirstFont(codeCJKFontCandidates(), "no suitable CJK code TrueType font was found for PDF export")
+}
+
+func readFirstFont(candidates []string, message string) ([]byte, error) {
+	for _, candidate := range candidates {
 		if candidate == "" {
 			continue
 		}
@@ -469,23 +988,64 @@ func readBodyFont() ([]byte, error) {
 			return data, nil
 		}
 	}
-	return nil, errors.New("no suitable TrueType font was found for PDF export")
+	return nil, errors.New(message)
 }
 
 func bodyFontCandidates() []string {
-	windowsFonts := filepath.Join(os.Getenv("WINDIR"), "Fonts")
-	if os.Getenv("WINDIR") == "" {
-		windowsFonts = `C:\Windows\Fonts`
-	}
+	windowsFonts := windowsFontDir()
 
 	return []string{
+		filepath.Join(windowsFonts, "STSONG.TTF"),
+		filepath.Join(windowsFonts, "NotoSerifSC-VF.ttf"),
+		filepath.Join(windowsFonts, "SimsunExtG.ttf"),
 		filepath.Join(windowsFonts, "Deng.ttf"),
 		filepath.Join(windowsFonts, "simhei.ttf"),
-		filepath.Join(windowsFonts, "simsunb.ttf"),
 		filepath.Join(windowsFonts, "NotoSansSC-VF.ttf"),
 		filepath.Join(windowsFonts, "malgun.ttf"),
 		filepath.Join(windowsFonts, "arial.ttf"),
 	}
+}
+
+func boldFontCandidates() []string {
+	windowsFonts := windowsFontDir()
+
+	return []string{
+		filepath.Join(windowsFonts, "Dengb.ttf"),
+		filepath.Join(windowsFonts, "simhei.ttf"),
+		filepath.Join(windowsFonts, "NotoSansSC-VF.ttf"),
+		filepath.Join(windowsFonts, "NotoSerifSC-VF.ttf"),
+		filepath.Join(windowsFonts, "simsunb.ttf"),
+		filepath.Join(windowsFonts, "arialbd.ttf"),
+	}
+}
+
+func monoFontCandidates() []string {
+	windowsFonts := windowsFontDir()
+
+	return []string{
+		filepath.Join(windowsFonts, "CascadiaCode.ttf"),
+		filepath.Join(windowsFonts, "CascadiaMono.ttf"),
+		filepath.Join(windowsFonts, "consola.ttf"),
+		filepath.Join(windowsFonts, "cour.ttf"),
+	}
+}
+
+func codeCJKFontCandidates() []string {
+	windowsFonts := windowsFontDir()
+
+	return []string{
+		filepath.Join(windowsFonts, "Deng.ttf"),
+		filepath.Join(windowsFonts, "NotoSansSC-VF.ttf"),
+		filepath.Join(windowsFonts, "simhei.ttf"),
+		filepath.Join(windowsFonts, "STSONG.TTF"),
+	}
+}
+
+func windowsFontDir() string {
+	if windir := os.Getenv("WINDIR"); windir != "" {
+		return filepath.Join(windir, "Fonts")
+	}
+	return `C:\Windows\Fonts`
 }
 
 func paragraphOnlyImage(node *goldast.Paragraph) *goldast.Image {

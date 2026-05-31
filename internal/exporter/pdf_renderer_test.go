@@ -9,7 +9,8 @@ import (
 
 func TestRenderMarkdownPDF(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "viewmd-export.pdf")
-	err := RenderMarkdownPDF("# 标题\n\n这是一段中文 Markdown 内容。\n\n- 项目一\n- 项目二\n\n```go\nfmt.Println(\"hello\")\n```\n", "", target)
+	markdown := "# \u6807\u9898\n\n\u8fd9\u662f **\u52a0\u7c97\u4e2d\u6587** \u548c `\u884c\u5185\u4ee3\u7801\u4e2d\u6587` \u3002\n\n- \u65e0\u5e8f\u5217\u8868\n* \u661f\u53f7\u5217\u8868\n1. \u6709\u5e8f\u5217\u8868\n2. \u7b2c\u4e8c\u9879\n\n```go\nfmt.Println(\"\u4ee3\u7801\u5757\u4e2d\u6587\")\n```\n"
+	err := RenderMarkdownPDF(markdown, "", target)
 	if err != nil {
 		if strings.Contains(err.Error(), "no suitable TrueType font") {
 			t.Skip(err)

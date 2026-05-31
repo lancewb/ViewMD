@@ -162,6 +162,11 @@
   padding: 10px;
 }
 
+.workspace-animate {
+  min-height: 0;
+  min-width: 0;
+}
+
 .sidebar,
 .workbench {
   min-height: 0;
@@ -444,6 +449,7 @@
 
 .editor-stage {
   min-height: 0;
+  overflow: hidden;
   display: grid;
   gap: 10px;
   padding: 10px;
@@ -465,6 +471,7 @@
 .preview-pane {
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-rows: 37px minmax(0, 1fr);
   border: 1px solid rgba(23, 26, 28, 0.2);
@@ -508,6 +515,8 @@
 .code-editor,
 .code-editor .cm-editor {
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .code-editor .cm-editor {
@@ -519,6 +528,10 @@
 .code-editor .cm-scroller,
 .code-editor .cm-editor {
   background: #0b1114 !important;
+}
+
+.code-editor .cm-scroller {
+  overflow: auto;
 }
 
 .code-editor .cm-content {
@@ -543,6 +556,7 @@
 
 .preview-scroll {
   min-height: 0;
+  height: 100%;
   overflow: auto;
 }
 
