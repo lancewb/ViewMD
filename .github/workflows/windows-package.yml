@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version, for example 1.2.3. Leave empty to use the tag or 0.1.0."
-        required: false
+        description: "Release version, for example 1.2.3 or v1.2.3."
+        required: true
         type: string
   push:
     tags:
@@ -54,7 +54,7 @@ jobs:
             $rawVersion = "${{ github.ref_name }}"
           }
           if ([string]::IsNullOrWhiteSpace($rawVersion)) {
-            $rawVersion = "0.1.0"
+            throw "A release version is required when running this workflow manually."
           }
 
           $displayVersion = $rawVersion.TrimStart("v")
@@ -72,19 +72,17 @@ jobs:
 
           $msiVersion = "$major.$minor.$patch"
           $artifactVersion = $displayVersion -replace "[^0-9A-Za-z._-]", "-"
-          if ("${{ github.ref_type }}" -ne "tag" -and [string]::IsNullOrWhiteSpace("${{ github.event.inputs.version }}")) {
-            $shortSha = "${{ github.sha }}".Substring(0, 7)
-            $artifactVersion = "$artifactVersion-$shortSha"
-          }
-
+          $releaseTag = "v$displayVersion"
           $prefix = "$env:APP_NAME-$artifactVersion-windows-amd64"
 
           "MSI_VERSION=$msiVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PACKAGE_VERSION=$artifactVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PACKAGE_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Append
           "msi_version=$msiVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "package_version=$artifactVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "package_prefix=$prefix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "release_tag=$releaseTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Install Wails CLI
         shell: pwsh
@@ -150,14 +148,28 @@ jobs:
             dist/*-portable.zip
           if-no-files-found: error
 
-      - name: Publish tag release assets
-        if: github.ref_type == 'tag'
+      - name: Publish GitHub release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "${{ github.ref_name }}" | Out-Null
+          $assets = @(
+            "dist\$env:PACKAGE_PREFIX.msi",
+            "dist\$env:PACKAGE_PREFIX-portable.zip"
+          )
+
+          gh release view "$env:RELEASE_TAG" | Out-Null
           if ($LASTEXITCODE -ne 0) {
-            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --notes "Automated Windows packages."
+            gh release create "$env:RELEASE_TAG" `
+              --target "${{ github.sha }}" `
+              --title "ViewMD $env:PACKAGE_VERSION" `
+              --notes "Automated Windows packages for ViewMD $env:PACKAGE_VERSION."
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create release $env:RELEASE_TAG."
+            }
           }
-          gh release upload "${{ github.ref_name }}" dist\*.msi dist\*-portable.zip --clobber
+
+          gh release upload "$env:RELEASE_TAG" $assets --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload release assets to $env:RELEASE_TAG."
+          }
