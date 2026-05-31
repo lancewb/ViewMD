@@ -250,20 +250,19 @@ func (r *markdownPDFRenderer) renderListItem(marker string, item goldast.Node, i
 
 func (r *markdownPDFRenderer) renderMarkedText(marker string, text string, indent float64) {
 	markerWidth := r.listMarkerWidth(marker)
-	r.pdf.SetFont(r.bodyFont, "", 11.5)
-	r.pdf.SetTextColor(32, 35, 33)
-	r.pdf.SetX(pdfMarginLeft + indent)
-	r.pdf.CellFormat(markerWidth, 6.4, marker, "", 0, "L", false, 0, "")
-	r.pdf.MultiCell(r.contentWidth-indent-markerWidth, 6.4, text, "", "L", false)
+	segments := []pdfInlineSegment{{Text: marker + " "}}
+	if text != "" {
+		segments = append(segments, pdfInlineSegment{Text: text})
+	}
+	r.renderInlineSegmentsAtHanging(segments, 11.5, 6.4, "", pdfMarginLeft+indent, pdfMarginLeft+indent+markerWidth, r.contentWidth-indent)
 }
 
 func (r *markdownPDFRenderer) renderMarkedInline(marker string, segments []pdfInlineSegment, indent float64) {
 	markerWidth := r.listMarkerWidth(marker)
-	r.pdf.SetFont(r.bodyFont, "", 11.5)
-	r.pdf.SetTextColor(32, 35, 33)
-	r.pdf.SetX(pdfMarginLeft + indent)
-	r.pdf.CellFormat(markerWidth, 6.4, marker, "", 0, "L", false, 0, "")
-	r.renderInlineSegmentsAt(segments, 11.5, 6.4, "", pdfMarginLeft+indent+markerWidth, r.contentWidth-indent-markerWidth)
+	listSegments := make([]pdfInlineSegment, 0, len(segments)+1)
+	listSegments = append(listSegments, pdfInlineSegment{Text: marker + " "})
+	listSegments = append(listSegments, segments...)
+	r.renderInlineSegmentsAtHanging(listSegments, 11.5, 6.4, "", pdfMarginLeft+indent, pdfMarginLeft+indent+markerWidth, r.contentWidth-indent)
 }
 
 func (r *markdownPDFRenderer) listMarkerWidth(marker string) float64 {
@@ -597,6 +596,10 @@ func (r *markdownPDFRenderer) renderInlineSegments(segments []pdfInlineSegment, 
 }
 
 func (r *markdownPDFRenderer) renderInlineSegmentsAt(segments []pdfInlineSegment, size float64, lineHeight float64, baseStyle string, leftX float64, width float64) {
+	r.renderInlineSegmentsAtHanging(segments, size, lineHeight, baseStyle, leftX, leftX, width)
+}
+
+func (r *markdownPDFRenderer) renderInlineSegmentsAtHanging(segments []pdfInlineSegment, size float64, lineHeight float64, baseStyle string, leftX float64, continuationX float64, width float64) {
 	atoms := inlineAtoms(segments)
 	if len(atoms) == 0 || width <= 0 {
 		return
@@ -604,13 +607,15 @@ func (r *markdownPDFRenderer) renderInlineSegmentsAt(segments []pdfInlineSegment
 
 	x := leftX
 	y := r.pdf.GetY()
+	lineStartX := leftX
 	rightX := leftX + width
 	drew := false
 
 	for _, atom := range atoms {
 		if atom.Text == "\n" {
 			y = r.nextInlineLine(y, lineHeight)
-			x = leftX
+			x = continuationX
+			lineStartX = continuationX
 			continue
 		}
 
@@ -620,14 +625,15 @@ func (r *markdownPDFRenderer) renderInlineSegmentsAt(segments []pdfInlineSegment
 		}
 
 		for _, part := range parts {
-			if part.Text == " " && nearSameX(x, leftX) {
+			if part.Text == " " && nearSameX(x, lineStartX) {
 				continue
 			}
 
 			atomWidth := r.inlineAtomWidth(part, size, baseStyle)
-			if !nearSameX(x, leftX) && x+atomWidth > rightX {
+			if !nearSameX(x, lineStartX) && x+atomWidth > rightX {
 				y = r.nextInlineLine(y, lineHeight)
-				x = leftX
+				x = continuationX
+				lineStartX = continuationX
 				if part.Text == " " {
 					continue
 				}
