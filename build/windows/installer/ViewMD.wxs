@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="ViewMD"
+    Manufacturer="lancewb"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{DF2F2B3B-AF16-416C-9436-399AC2F9D791}"
+    Scope="perMachine">
+
+    <SummaryInformation Description="ViewMD Windows installer" Manufacturer="lancewb" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="ManufacturerFolder" Name="lancewb">
+        <Directory Id="INSTALLFOLDER" Name="ViewMD">
+          <Component Id="MainExecutable" Guid="{BDF7E50E-05DC-473D-B347-B4B0ADBEF82B}" Bitness="always64">
+            <File Id="ViewMDExe" Source="$(var.SourceDir)\ViewMD.exe" KeyPath="yes" />
+            <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+            <RemoveFolder Id="RemoveManufacturerFolder" Directory="ManufacturerFolder" On="uninstall" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="ViewMD">
+        <Component Id="StartMenuShortcutComponent" Guid="{4E3E4B49-2201-470F-AF6A-3C9526B1AAA1}" Bitness="always64">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Name="ViewMD"
+            Description="Open ViewMD"
+            Target="[INSTALLFOLDER]ViewMD.exe"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="AppIcon.ico" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKLM" Key="Software\lancewb\ViewMD" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcutComponent" Guid="{77A65DE1-B779-404E-88B6-27A6F3AE0F70}" Bitness="always64">
+        <Shortcut
+          Id="DesktopShortcut"
+          Name="ViewMD"
+          Description="Open ViewMD"
+          Target="[INSTALLFOLDER]ViewMD.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="AppIcon.ico" />
+        <RegistryValue Root="HKLM" Key="Software\lancewb\ViewMD" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="DefaultFeature" Title="ViewMD" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+      <ComponentRef Id="DesktopShortcutComponent" />
+    </Feature>
+  </Package>
+</Wix>

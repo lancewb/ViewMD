@@ -1,0 +1,163 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version, for example 1.2.3. Leave empty to use the tag or 0.1.0."
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package-windows:
+    name: Build Windows MSI and portable ZIP
+    runs-on: windows-latest
+
+    env:
+      APP_NAME: ViewMD
+      APP_EXE: ViewMD.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Resolve package version
+        id: version
+        shell: pwsh
+        run: |
+          $rawVersion = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($rawVersion) -and "${{ github.ref_type }}" -eq "tag") {
+            $rawVersion = "${{ github.ref_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($rawVersion)) {
+            $rawVersion = "0.1.0"
+          }
+
+          $displayVersion = $rawVersion.TrimStart("v")
+          $versionMatch = [regex]::Match($displayVersion, "^(\d+)\.(\d+)\.(\d+)")
+          if (-not $versionMatch.Success) {
+            throw "Version '$rawVersion' must start with a numeric semantic version, for example v1.2.3."
+          }
+
+          $major = [int]$versionMatch.Groups[1].Value
+          $minor = [int]$versionMatch.Groups[2].Value
+          $patch = [int]$versionMatch.Groups[3].Value
+          if ($major -gt 255 -or $minor -gt 255 -or $patch -gt 65535) {
+            throw "MSI ProductVersion '$major.$minor.$patch' is outside Windows Installer limits."
+          }
+
+          $msiVersion = "$major.$minor.$patch"
+          $artifactVersion = $displayVersion -replace "[^0-9A-Za-z._-]", "-"
+          if ("${{ github.ref_type }}" -ne "tag" -and [string]::IsNullOrWhiteSpace("${{ github.event.inputs.version }}")) {
+            $shortSha = "${{ github.sha }}".Substring(0, 7)
+            $artifactVersion = "$artifactVersion-$shortSha"
+          }
+
+          $prefix = "$env:APP_NAME-$artifactVersion-windows-amd64"
+
+          "MSI_VERSION=$msiVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PACKAGE_VERSION=$artifactVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PACKAGE_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "msi_version=$msiVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "package_version=$artifactVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "package_prefix=$prefix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Install Wails CLI
+        shell: pwsh
+        run: |
+          go mod download
+          $wailsVersion = go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2
+          go install "github.com/wailsapp/wails/v2/cmd/wails@$wailsVersion"
+          $goBin = Join-Path (go env GOPATH) "bin"
+          $goBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          & (Join-Path $goBin "wails.exe") version
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          wix --version
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Test Go packages
+        run: go test ./...
+
+      - name: Build Wails executable
+        shell: pwsh
+        run: |
+          wails build -s -clean -trimpath -platform windows/amd64 -webview2 download
+          if (-not (Test-Path "build\bin\$env:APP_EXE")) {
+            throw "Expected build output build\bin\$env:APP_EXE was not created."
+          }
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist, dist\portable | Out-Null
+          Copy-Item "build\bin\$env:APP_EXE" "dist\portable\$env:APP_EXE" -Force
+          Compress-Archive -Path dist\portable\* -DestinationPath "dist\$env:PACKAGE_PREFIX-portable.zip" -Force
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $sourceDir = (Resolve-Path dist\portable).Path
+          $iconPath = (Resolve-Path build\windows\icon.ico).Path
+
+          wix build build\windows\installer\ViewMD.wxs `
+            -arch x64 `
+            -d "ProductVersion=$env:MSI_VERSION" `
+            -d "SourceDir=$sourceDir" `
+            -d "IconPath=$iconPath" `
+            -out "dist\$env:PACKAGE_PREFIX.msi"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.version.outputs.package_prefix }}
+          path: |
+            dist/*.msi
+            dist/*-portable.zip
+          if-no-files-found: error
+
+      - name: Publish tag release assets
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ github.ref_name }}" | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --notes "Automated Windows packages."
+          }
+          gh release upload "${{ github.ref_name }}" dist\*.msi dist\*-portable.zip --clobber
